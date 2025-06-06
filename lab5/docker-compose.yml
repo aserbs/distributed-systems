@@ -1,0 +1,276 @@
+version: "3.8"
+
+services:
+  # ========================================
+  #   1. Consul (Server + UI)
+  # ========================================
+  consul:
+    image: hashicorp/consul:1.15
+    container_name: consul
+    ports:
+      - "8500:8500" # UI та HTTP API
+      - "8600:8600/udp" # DNS
+    command: agent -server -bootstrap-expect=1 -ui -client=0.0.0.0
+    environment:
+      - CONSUL_BIND_INTERFACE=eth0
+    volumes:
+      - consul-data:/consul/data
+
+  consul-init:
+    image: curlimages/curl:7.85.0 # будь-який легкий образ із curl
+    container_name: consul-init
+    depends_on:
+      - consul
+    volumes:
+      - ./consul_lab5.sh:/consul_lab5.sh
+    entrypoint: ["/bin/sh", "/consul_lab5.sh"]
+
+  # ========================================
+  #   2. Zookeeper (для Kafka)
+  # ========================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    ports:
+      - "2181:2181"
+
+  # ========================================
+  #   3. Kafka Brokers
+  # ========================================
+  kafka1:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka1
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka1:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9092:9092"
+
+  kafka2:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka2
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka2:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9093:9093"
+
+  kafka3:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka3
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 3
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka3:9094
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9094:9094"
+
+  # Ініціалізуємо топік «messages» (якщо він ще не існує)
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka-init
+    depends_on:
+      - kafka1
+      - kafka2
+      - kafka3
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - |
+        set -e
+        kafka-topics --create --topic messages \
+          --bootstrap-server kafka1:9092 \
+          --replication-factor 3 \
+          --partitions 2 || true
+        # Не завершуємо контейнер, лишаємо його висіти
+        sleep infinity
+
+  # ========================================
+  #   4. Hazelcast Ноди
+  # ========================================
+  hazelcast1:
+    image: hazelcast/hazelcast:5.3
+    container_name: hazelcast1
+    ports:
+      - "5701:5701"
+
+  hazelcast2:
+    image: hazelcast/hazelcast:5.3
+    container_name: hazelcast2
+    ports:
+      - "5702:5701"
+
+  hazelcast3:
+    image: hazelcast/hazelcast:5.3
+    container_name: hazelcast3
+    ports:
+      - "5703:5701"
+
+  # ========================================
+  #   5. Facade-Service (пишемо на Python)
+  # ========================================
+  facade-service:
+    image: python:3.10-slim
+    container_name: facade-service
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8880:8880"
+    depends_on:
+      - kafka1
+      - kafka2
+      - kafka3
+      - consul
+      - consul-init
+    environment:
+      - CONSUL_ADDRESS=http://consul:8500
+      - FACADE_PORT=8880
+    command: >
+      sh -c "
+        pip install --no-cache-dir fastapi uvicorn[standard] requests python-consul aiokafka &&
+        uvicorn facade_service:app --host 0.0.0.0 --port 8880
+      "
+
+  # ========================================
+  #   6. Messages-Service (два екземпляри)
+  # ========================================
+  messages-service1:
+    image: python:3.10-slim
+    container_name: messages-service1
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8890:8890"
+    depends_on:
+      - kafka1
+      - kafka2
+      - kafka3
+      - consul
+      - consul-init
+    environment:
+      - CONSUL_ADDRESS=http://consul:8500
+      - MESSAGES_PORT=8890
+    command: >
+      sh -c "
+        pip install --no-cache-dir fastapi uvicorn[standard] requests python-consul aiokafka &&
+        uvicorn messages_service:app --host 0.0.0.0 --port 8890
+      "
+
+  messages-service2:
+    image: python:3.10-slim
+    container_name: messages-service2
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8891:8891"
+    depends_on:
+      - kafka1
+      - kafka2
+      - kafka3
+      - consul
+      - consul-init
+    environment:
+      - CONSUL_ADDRESS=http://consul:8500
+      - MESSAGES_PORT=8891
+    command: >
+      sh -c "
+        pip install --no-cache-dir fastapi uvicorn[standard] requests python-consul aiokafka &&
+        uvicorn messages_service:app --host 0.0.0.0 --port 8891
+      "
+
+  # ========================================
+  #   7. Logging-Service (три екземпляри)
+  # ========================================
+  logging-service1:
+    image: python:3.10-slim
+    container_name: logging-service1
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8881:8881"
+    depends_on:
+      - hazelcast1
+      - hazelcast2
+      - hazelcast3
+      - consul
+      - consul-init
+    environment:
+      - CONSUL_ADDRESS=http://consul:8500
+      - LOGGING_PORT=8881
+    command: >
+      sh -c "
+        pip install --no-cache-dir fastapi uvicorn[standard] requests python-consul hazelcast-python-client &&
+        uvicorn logging_service:app --host 0.0.0.0 --port 8881
+      "
+
+  logging-service2:
+    image: python:3.10-slim
+    container_name: logging-service2
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8882:8882"
+    depends_on:
+      - hazelcast1
+      - hazelcast2
+      - hazelcast3
+      - consul
+      - consul-init
+    environment:
+      - CONSUL_ADDRESS=http://consul:8500
+      - LOGGING_PORT=8882
+    command: >
+      sh -c "
+        pip install --no-cache-dir fastapi uvicorn[standard] requests python-consul hazelcast-python-client &&
+        uvicorn logging_service:app --host 0.0.0.0 --port 8882
+      "
+
+  logging-service3:
+    image: python:3.10-slim
+    container_name: logging-service3
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8883:8883"
+    depends_on:
+      - hazelcast1
+      - hazelcast2
+      - hazelcast3
+      - consul
+      - consul-init
+    environment:
+      - CONSUL_ADDRESS=http://consul:8500
+      - LOGGING_PORT=8883
+    command: >
+      sh -c "
+        pip install --no-cache-dir fastapi uvicorn[standard] requests python-consul hazelcast-python-client &&
+        uvicorn logging_service:app --host 0.0.0.0 --port 8883
+      "
+
+volumes:
+  consul-data:
